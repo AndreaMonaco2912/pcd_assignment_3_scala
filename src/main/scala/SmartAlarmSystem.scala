@@ -1,7 +1,8 @@
 package assignment3
 
-import SmartAlarmSystem.Command
+import SmartAlarmSystem.{Command, correctPin}
 
+import SmartAlarmSystem.Command.{ArmingPin, EnterPin, SensorDetection}
 import org.apache.pekko.actor.typed.*
 import org.apache.pekko.actor.typed.scaladsl.*
 
@@ -9,34 +10,25 @@ import scala.concurrent.duration.DurationInt
 
 @main
 def main(): Unit =
+  val wrongPin = "2222"
   val system = ActorSystem(SmartAlarmSystem(), "SmartAlarmSystem")
-  system ! Command.SensorDetection("Hall")
-  Thread.sleep(1000)
 
-  system ! Command.EnterPin("222")
-  Thread.sleep(1000)
-
-  system ! Command.EnterPin("1234")// exit house arming (timer started)
-  system ! Command.EnterPin("1234")//disarmed immediately
-  system ! Command.EnterPin("1234")//rearmed
-  Thread.sleep(1200)
-
-  system ! Command.SensorDetection("Hall")
-
-  system ! Command.EnterPin("222")// typo in pin
-  system ! Command.EnterPin("1234")// correct pin
-
-  Thread.sleep(500)
-
-  system ! Command.EnterPin("1234") //exit again
-  Thread.sleep(1500) //system armed
-
-  system ! Command.SensorDetection("Hall")
+  system ! ArmingPin(correctPin, Set("Kitchen"))
   Thread.sleep(2000)
-  system ! Command.EnterPin("222") //should not nino
-  Thread.sleep(2000) // should nino
-  system ! Command.EnterPin("222")
-  system ! Command.EnterPin("1234")
+  //No armed zone
+  system ! SensorDetection("Bedroom")
+  //Armed zone
+  system ! SensorDetection("Kitchen")
+  system ! EnterPin(correctPin)
+  Thread.sleep(2000)
+
+  // Now arm all house
+  system ! EnterPin(correctPin)
+  Thread.sleep(2000)
+  system ! SensorDetection("Kitchen")
+  Thread.sleep(5000)
+  system ! EnterPin(wrongPin)
+  system ! EnterPin(correctPin)
 
 object SmartAlarmSystem:
   enum Command:
@@ -49,83 +41,85 @@ object SmartAlarmSystem:
   export Command.*
 
   val correctPin = "1234"
-  val exitDuration = 1.seconds
-  val enterDuration = 3.seconds
+  private val exitDuration = 1.seconds
+  private val enterDuration = 3.seconds
 
-  val allZones = Set("Hall", "Kitchen", "BedRoom")
-  var armedZones = Set.empty[String]
+  private val allZones = Set("Hall", "Kitchen", "BedRoom")
+  private var armedZones = Set.empty[String]
 
   def apply(): Behavior[Command] = Behaviors.setup: ctx =>
     disarmed(ctx)
 
-  def disarmed(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
+  private def disarmed(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
     case Command.EnterPin(pin) if pin == correctPin =>
-      ctx.log.info("Correct pin, fully armed House! You have: " + exitDuration + " to leave your home")
+      ctx.log.info("D-Correct pin, all zones are armed. You have: " + exitDuration + " to leave your home.")
       armedZones = allZones
       Behaviors.withTimers: timers =>
         timers.startSingleTimer(ExitTimer, exitDuration)
         exitTimer(ctx)
     case Command.ArmingPin(pin, zones) if pin == correctPin =>
-      ctx.log.info("Correct pin, armed zones are: " + zones)
+      ctx.log.info("D-Correct pin, armed zones are: " + zones + ".")
       armedZones = zones
       Behaviors.withTimers: timers =>
         timers.startSingleTimer(ExitTimer, exitDuration)
         exitTimer(ctx)
     case Command.EnterPin(_) | Command.ArmingPin(_, _) =>
-      ctx.log.info("WROOOOONG")
+      ctx.log.info("D-Wrong pin.")
       Behaviors.same
     case _ =>
       Behaviors.same
 
-  def exitTimer(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
+  private def exitTimer(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
     case Command.EnterPin(pin) if pin == correctPin =>
-      ctx.log.info("System disarmed successfully!")
+      ctx.log.info("EXT-System disarmed successfully.")
       disarmed(ctx)
     case Command.EnterPin(_) =>
-      ctx.log.info("WROOOOONG")
+      ctx.log.info("EXT-Wrong pin.")
       Behaviors.same
     case Command.ExitTimer =>
-      ctx.log.info("House armed and Dangerous")
+      ctx.log.info("EXT-Now actually armed.")
       armed(ctx)
     case _ =>
       Behaviors.same
 
-  def armed(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
+  private def armed(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
     case Command.EnterPin(pin) if pin == correctPin =>
-      ctx.log.info("Correct pin from disabled Zone!!!")
+      ctx.log.info("A-Correct pin. Or from disabled zone or some sensor could be broken.")
       disarmed(ctx)
     case Command.EnterPin(_) =>
-      ctx.log.info("Wrong Pin Fast to Alarm!!")
+      ctx.log.info("A-Wrong pin. No detection, so some sensor could be broken.")
       alarm(ctx)
     case Command.SensorDetection(zone) if armedZones.contains(zone) =>
-      ctx.log.info("Movement detected!!!")
+      ctx.log.info("A-Movement detected.")
       Behaviors.withTimers: timers =>
         timers.cancelAll()
         timers.startSingleTimer(EnterTimer, enterDuration)
         enterTimer(ctx)
+    case Command.SensorDetection(_) =>
+      ctx.log.info("A-Movement detected from no armed zone. No intrusion.")
+      Behaviors.same
     case _ =>
       Behaviors.same
 
-  def enterTimer(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
+  private def enterTimer(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
     case Command.EnterPin(pin) if pin == correctPin =>
-      ctx.log.info("Correct Pin alarm disabled")
-      //stop timer
+      ctx.log.info("ENT-Correct pin. Alarm disabled.")
       disarmed(ctx)
     case Command.EnterPin(_) =>
-      ctx.log.info("WROOOOONG")
+      ctx.log.info("ENT-Wrong pin.")
       Behaviors.same
     case Command.EnterTimer =>
-      ctx.log.info("NINONINONINONINO")
+      ctx.log.info("ENT-ALARM.")
       alarm(ctx)
     case _ =>
       Behaviors.same
 
-  def alarm(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
+  private def alarm(ctx: ActorContext[Command]): Behavior[Command] = Behaviors.receiveMessagePartial:
     case Command.EnterPin(pin) if pin == correctPin =>
-      ctx.log.info("Welcome Back, alarm disabled, as you can here")
+      ctx.log.info("AL-Alarm disabled.")
       disarmed(ctx)
     case Command.EnterPin(_) =>
-      ctx.log.info("WROOOOOOOOONG ULTRA MEGA SUPER NINONINONINONINO")
+      ctx.log.info("AL-Wrong pin. Keep ALARM.")
       Behaviors.same
     case _ =>
       Behaviors.same
